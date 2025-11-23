@@ -9,7 +9,7 @@ dependencies {
     // Order module only
     implementation(project(":modules:shared-kernel"))
     implementation(project(":modules:order-management"))
-    implementation(project(":infrastructure:event-store"))
+    implementation(project(":modules:temporal-workflows"))
     implementation(project(":infrastructure:messaging"))
 
     // Spring Boot

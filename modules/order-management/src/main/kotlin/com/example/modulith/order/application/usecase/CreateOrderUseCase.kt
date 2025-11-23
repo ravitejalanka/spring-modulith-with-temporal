@@ -4,7 +4,6 @@ import arrow.core.Either
 import arrow.core.NonEmptyList
 import arrow.core.raise.either
 import arrow.core.raise.ensure
-import com.example.modulith.order.application.port.DomainEventPublisher
 import com.example.modulith.order.application.port.IntegrationEventPublisher
 import com.example.modulith.order.application.port.OrderRepository
 import com.example.modulith.order.domain.event.OrderItemDto
@@ -35,12 +34,14 @@ data class CreateOrderItemDto(
 
 /**
  * Use case for creating orders
+ *
+ * Domain events are now stored automatically in Temporal's workflow history
+ * via the TemporalOrderRepository implementation
  */
 @Service
 @Transactional
 class CreateOrderUseCase(
     private val orderRepository: OrderRepository,
-    private val domainEventPublisher: DomainEventPublisher,
     private val integrationEventPublisher: IntegrationEventPublisher
 ) {
     suspend fun execute(command: CreateOrderCommand): Either<DomainError, OrderId> = either {
@@ -72,11 +73,8 @@ class CreateOrderUseCase(
         // Confirm order immediately (simplified flow)
         val confirmedOrder = pendingOrder.confirm().bind()
 
-        // Persist domain events to event store
-        domainEventPublisher.publish(
-            confirmedOrder.id,
-            confirmedOrder.events
-        ).bind()
+        // Save order (domain events are stored in Temporal's workflow history)
+        orderRepository.save(confirmedOrder).bind()
 
         // Publish integration event for other modules
         val integrationEvent = OrderPlacedIntegrationEvent(

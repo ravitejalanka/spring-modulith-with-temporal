@@ -10,7 +10,7 @@ val coroutinesVersion: String by rootProject.extra
 dependencies {
     // Shared modules
     api(project(":modules:shared-kernel"))
-    implementation(project(":infrastructure:event-store"))
+    implementation(project(":modules:temporal-workflows"))
     implementation(project(":infrastructure:messaging"))
 
     // Spring Boot

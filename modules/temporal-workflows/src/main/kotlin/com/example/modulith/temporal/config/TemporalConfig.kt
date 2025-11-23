@@ -1,6 +1,7 @@
 package com.example.modulith.temporal.config
 
 import com.example.modulith.temporal.activity.*
+import com.example.modulith.temporal.workflow.OrderAggregateWorkflowImpl
 import com.example.modulith.temporal.workflow.OrderFulfillmentWorkflowImpl
 import io.temporal.client.WorkflowClient
 import io.temporal.client.WorkflowClientOptions
@@ -17,7 +18,8 @@ import org.springframework.context.annotation.Configuration
 data class TemporalProperties(
     val serviceAddress: String = "localhost:7233",
     val namespace: String = "default",
-    val taskQueue: String = "order-fulfillment-task-queue"
+    val taskQueue: String = "order-fulfillment-task-queue",
+    val aggregateTaskQueue: String = "order-aggregate-task-queue"
 )
 
 /**
@@ -29,6 +31,7 @@ class TemporalConfig {
 
     companion object {
         const val TASK_QUEUE = "order-fulfillment-task-queue"
+        const val AGGREGATE_TASK_QUEUE = "order-aggregate-task-queue"
     }
 
     @Bean
@@ -57,8 +60,8 @@ class TemporalConfig {
         return WorkerFactory.newInstance(workflowClient)
     }
 
-    @Bean
-    fun worker(
+    @Bean("fulfillmentWorker")
+    fun fulfillmentWorker(
         workerFactory: WorkerFactory,
         orderActivity: OrderActivityImpl,
         paymentActivity: PaymentActivityImpl,
@@ -67,7 +70,7 @@ class TemporalConfig {
     ): Worker {
         val worker = workerFactory.newWorker(properties.taskQueue)
 
-        // Register workflows
+        // Register fulfillment workflow
         worker.registerWorkflowImplementationTypes(OrderFulfillmentWorkflowImpl::class.java)
 
         // Register activities
@@ -76,6 +79,19 @@ class TemporalConfig {
             paymentActivity,
             fulfillmentActivity
         )
+
+        return worker
+    }
+
+    @Bean("aggregateWorker")
+    fun aggregateWorker(
+        workerFactory: WorkerFactory,
+        properties: TemporalProperties
+    ): Worker {
+        val worker = workerFactory.newWorker(properties.aggregateTaskQueue)
+
+        // Register aggregate workflow (event store)
+        worker.registerWorkflowImplementationTypes(OrderAggregateWorkflowImpl::class.java)
 
         return worker
     }

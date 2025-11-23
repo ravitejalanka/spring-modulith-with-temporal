@@ -16,7 +16,6 @@ dependencies {
     implementation(project(":modules:temporal-workflows"))
 
     // Infrastructure modules
-    implementation(project(":infrastructure:event-store"))
     implementation(project(":infrastructure:messaging"))
 
     // Spring Boot starters

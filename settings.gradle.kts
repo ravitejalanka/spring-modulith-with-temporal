@@ -11,7 +11,6 @@ include(
 
 // Infrastructure
 include(
-    "infrastructure:event-store",
     "infrastructure:messaging"
 )
 
