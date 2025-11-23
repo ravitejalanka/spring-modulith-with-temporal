@@ -1,0 +1,42 @@
+# Minimal setup for local development (modulith mode)
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: modulith-postgres-dev
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: modulith_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-dev-data:/var/lib/postgresql/data
+
+  temporal:
+    image: temporalio/auto-setup:1.22.4
+    container_name: modulith-temporal-dev
+    depends_on:
+      - postgres
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_PWD=postgres
+      - POSTGRES_SEEDS=postgres
+    ports:
+      - "7233:7233"
+
+  temporal-ui:
+    image: temporalio/ui:2.21.3
+    container_name: modulith-temporal-ui-dev
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres-dev-data:
