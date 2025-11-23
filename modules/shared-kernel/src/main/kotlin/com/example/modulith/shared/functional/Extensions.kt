@@ -5,6 +5,7 @@ import arrow.core.NonEmptyList
 import arrow.core.raise.either
 import arrow.core.raise.ensure
 import com.example.modulith.shared.domain.DomainError
+import org.springframework.dao.DataIntegrityViolationException
 
 /**
  * Extension functions for working with Either in a more idiomatic way
@@ -53,11 +54,77 @@ fun <A> List<Either<DomainError, A>>.sequence(): Either<DomainError, List<A>> =
     }
 
 /**
- * Execute a block and catch exceptions as Either
+ * Common error handlers
+ */
+object ErrorHandlers {
+    /**
+     * Handle database-related exceptions
+     */
+    fun handleDatabaseError(e: Throwable): DomainError = when (e) {
+        is DataIntegrityViolationException -> DomainError.ConcurrencyError(
+            "Concurrency conflict: ${e.message}"
+        )
+        else -> DomainError.ValidationError("Database error: ${e.message ?: "Unknown error"}")
+    }
+
+    /**
+     * Handle serialization/deserialization errors
+     */
+    fun handleSerializationError(e: Throwable): DomainError =
+        DomainError.ValidationError("Serialization error: ${e.message ?: "Unknown error"}")
+
+    /**
+     * Handle messaging errors
+     */
+    fun handleMessagingError(e: Throwable): DomainError =
+        DomainError.ValidationError("Messaging error: ${e.message ?: "Unknown error"}")
+
+    /**
+     * Generic error handler
+     */
+    fun handleGenericError(e: Throwable): DomainError =
+        DomainError.ValidationError(e.message ?: "Unknown error")
+}
+
+/**
+ * Execute a block and catch exceptions as Either using fold pattern
  */
 inline fun <T> catching(crossinline block: () -> T): Either<DomainError, T> =
     Either.catch { block() }
-        .mapLeft { e -> DomainError.ValidationError(e.message ?: "Unknown error") }
+        .fold(
+            { e -> Either.Left(ErrorHandlers.handleGenericError(e)) },
+            { result -> Either.Right(result) }
+        )
+
+/**
+ * Execute a database operation and handle exceptions
+ */
+inline fun <T> catchingDatabase(crossinline block: () -> T): Either<DomainError, T> =
+    Either.catch { block() }
+        .fold(
+            { e -> Either.Left(ErrorHandlers.handleDatabaseError(e)) },
+            { result -> Either.Right(result) }
+        )
+
+/**
+ * Execute a serialization operation and handle exceptions
+ */
+inline fun <T> catchingSerialization(crossinline block: () -> T): Either<DomainError, T> =
+    Either.catch { block() }
+        .fold(
+            { e -> Either.Left(ErrorHandlers.handleSerializationError(e)) },
+            { result -> Either.Right(result) }
+        )
+
+/**
+ * Execute a messaging operation and handle exceptions
+ */
+inline fun <T> catchingMessaging(crossinline block: () -> T): Either<DomainError, T> =
+    Either.catch { block() }
+        .fold(
+            { e -> Either.Left(ErrorHandlers.handleMessagingError(e)) },
+            { result -> Either.Right(result) }
+        )
 
 /**
  * Tap into the success case without changing the value

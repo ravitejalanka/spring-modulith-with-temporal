@@ -2,11 +2,11 @@ package com.example.modulith.infrastructure.messaging.kafka
 
 import arrow.core.Either
 import arrow.core.raise.either
-import arrow.core.raise.catch
 import com.example.modulith.infrastructure.messaging.EventPublisher
 import com.example.modulith.shared.domain.DomainError
 import com.example.modulith.shared.event.EventEnvelope
 import com.example.modulith.shared.event.IntegrationEvent
+import com.example.modulith.shared.functional.catchingMessaging
 import com.fasterxml.jackson.databind.ObjectMapper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.future.await
@@ -30,19 +30,16 @@ class KafkaEventPublisher(
     private val topicResolver: KafkaTopicResolver
 ) : EventPublisher {
 
-    override suspend fun publish(event: IntegrationEvent): Either<DomainError, Unit> = either {
+    override suspend fun publish(event: IntegrationEvent): Either<DomainError, Unit> =
         withContext(Dispatchers.IO) {
-            catch({
+            catchingMessaging {
                 val topic = topicResolver.resolve(event.eventType)
                 val payload = objectMapper.writeValueAsString(event)
 
                 kafkaTemplate.send(topic, event.eventId.toString(), payload)
                     .await()
-            }) { e ->
-                raise(DomainError.ValidationError("Failed to publish event to Kafka: ${e.message}"))
             }
         }
-    }
 
     override suspend fun publishAll(events: List<IntegrationEvent>): Either<DomainError, Unit> = either {
         events.forEach { event ->
@@ -52,19 +49,16 @@ class KafkaEventPublisher(
 
     override suspend fun publishWithMetadata(
         envelope: EventEnvelope<out IntegrationEvent>
-    ): Either<DomainError, Unit> = either {
+    ): Either<DomainError, Unit> =
         withContext(Dispatchers.IO) {
-            catch({
+            catchingMessaging {
                 val topic = topicResolver.resolve(envelope.eventType)
                 val payload = objectMapper.writeValueAsString(envelope)
 
                 kafkaTemplate.send(topic, envelope.eventId.toString(), payload)
                     .await()
-            }) { e ->
-                raise(DomainError.ValidationError("Failed to publish event envelope to Kafka: ${e.message}"))
             }
         }
-    }
 }
 
 /**
