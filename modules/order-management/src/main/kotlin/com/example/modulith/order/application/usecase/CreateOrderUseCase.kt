@@ -4,17 +4,14 @@ import arrow.core.Either
 import arrow.core.NonEmptyList
 import arrow.core.raise.either
 import arrow.core.raise.ensure
-import com.example.modulith.order.application.port.IntegrationEventPublisher
-import com.example.modulith.order.application.port.OrderRepository
-import com.example.modulith.order.domain.event.OrderItemDto
-import com.example.modulith.order.domain.event.OrderPlacedIntegrationEvent
+import com.example.modulith.order.application.handler.OrderCommandHandler
+import com.example.modulith.order.domain.command.OrderCommand
 import com.example.modulith.order.domain.model.*
 import com.example.modulith.shared.domain.DomainError
 import com.example.modulith.shared.domain.Money
 import com.example.modulith.shared.domain.Quantity
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
-import java.time.Instant
 import java.util.UUID
 
 /**
@@ -35,17 +32,20 @@ data class CreateOrderItemDto(
 /**
  * Use case for creating orders
  *
- * Domain events are now stored automatically in Temporal's workflow history
- * via the TemporalOrderRepository implementation
+ * Now uses the CommandHandler which follows the f{model} pattern:
+ * - Commands represent intentions
+ * - Decider makes decisions (pure function)
+ * - Events are stored in Temporal
+ * - State is evolved from events
  */
 @Service
 @Transactional
 class CreateOrderUseCase(
-    private val orderRepository: OrderRepository,
-    private val integrationEventPublisher: IntegrationEventPublisher
+    private val commandHandler: OrderCommandHandler
 ) {
     suspend fun execute(command: CreateOrderCommand): Either<DomainError, OrderId> = either {
-        // Validate and map command
+        // 1. Validate and map command to domain command
+        val orderId = OrderId.generate()
         val customerId = CustomerId(command.customerId)
 
         ensure(command.items.isNotEmpty()) {
@@ -67,27 +67,25 @@ class CreateOrderUseCase(
 
         val itemsNel = NonEmptyList.fromListUnsafe(orderItems)
 
-        // Create order aggregate
-        val pendingOrder = Order.create(customerId, itemsNel).bind()
-
-        // Confirm order immediately (simplified flow)
-        val confirmedOrder = pendingOrder.confirm().bind()
-
-        // Save order (domain events are stored in Temporal's workflow history)
-        orderRepository.save(confirmedOrder).bind()
-
-        // Publish integration event for other modules
-        val integrationEvent = OrderPlacedIntegrationEvent(
-            eventId = UUID.randomUUID(),
-            occurredAt = Instant.now(),
-            orderId = confirmedOrder.id,
-            customerId = confirmedOrder.customerId,
-            items = confirmedOrder.items.map { OrderItemDto.from(it) },
-            totalAmount = confirmedOrder.totalAmount
+        // 2. Create domain command
+        val createCommand = OrderCommand.CreateOrder(
+            orderId = orderId,
+            customerId = customerId,
+            items = itemsNel
         )
 
-        integrationEventPublisher.publish(integrationEvent).bind()
+        // 3. Handle command using CommandHandler (which uses Decider pattern)
+        // This will:
+        // - Load current state
+        // - Use Decider to decide events
+        // - Store events in Temporal
+        // - Publish integration events
+        commandHandler.handle(createCommand).bind()
 
-        confirmedOrder.id
+        // 4. Optionally confirm the order immediately (simplified flow)
+        val confirmCommand = OrderCommand.ConfirmOrder(orderId = orderId)
+        commandHandler.handle(confirmCommand).bind()
+
+        orderId
     }
 }

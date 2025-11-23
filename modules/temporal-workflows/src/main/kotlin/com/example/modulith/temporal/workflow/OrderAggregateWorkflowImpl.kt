@@ -1,8 +1,8 @@
 package com.example.modulith.temporal.workflow
 
-import arrow.core.NonEmptyList
+import com.example.modulith.order.domain.decider.OrderDecider
 import com.example.modulith.order.domain.event.OrderDomainEvent
-import com.example.modulith.order.domain.model.Order
+import com.example.modulith.order.domain.state.OrderState
 import io.temporal.workflow.Workflow
 import org.slf4j.LoggerFactory
 
@@ -11,13 +11,15 @@ import org.slf4j.LoggerFactory
  *
  * This eliminates the need for a separate PostgreSQL event store.
  * All events are stored in Temporal's durable workflow history.
+ *
+ * Now uses the Decider pattern from f{model} for clean, testable decision logic
  */
 class OrderAggregateWorkflowImpl : OrderAggregateWorkflow {
 
     private val logger = LoggerFactory.getLogger(OrderAggregateWorkflowImpl::class.java)
 
-    // Current order state (reconstituted from events)
-    private var currentOrder: Order? = null
+    // Current order state (reconstituted from events using OrderDecider)
+    private var currentState: OrderState = OrderState.Initial
 
     // Domain events (stored in Temporal's history)
     private val events = mutableListOf<OrderDomainEvent>()
@@ -25,215 +27,132 @@ class OrderAggregateWorkflowImpl : OrderAggregateWorkflow {
     override fun execute(command: OrderCommand): OrderCommandResult {
         logger.info("Executing command: ${command::class.simpleName} for order ${command.orderId}")
 
-        return when (command) {
-            is OrderCommand.CreateOrder -> handleCreateOrder(command)
-            is OrderCommand.ConfirmOrder -> handleConfirmOrder(command)
-            is OrderCommand.MarkAsPaid -> handleMarkAsPaid(command)
-            is OrderCommand.StartFulfillment -> handleStartFulfillment(command)
-            is OrderCommand.CompleteOrder -> handleCompleteOrder(command)
-            is OrderCommand.CancelOrder -> handleCancelOrder(command)
-        }
+        // Convert Temporal command to domain command
+        val domainCommand = mapToDomainCommand(command)
+
+        // Use Decider to decide what events should happen (pure function)
+        val decisionResult = OrderDecider.decide(currentState, domainCommand)
+
+        return decisionResult.fold(
+            { error ->
+                logger.error("Command failed: ${error.message}")
+                OrderCommandResult.Failure(error)
+            },
+            { newEvents ->
+                // Store events in Temporal's history
+                newEvents.forEach { event ->
+                    events.add(event)
+                    logger.info("Event recorded: ${event::class.simpleName}")
+                }
+
+                // Evolve state using Decider
+                currentState = OrderDecider.rehydrate(events)
+
+                // Convert state back to Order for backward compatibility
+                OrderCommandResult.Success(convertStateToOrder(currentState))
+            }
+        )
     }
 
-    override fun getOrder(): Order? = currentOrder
+    override fun getOrder(): com.example.modulith.order.domain.model.Order? {
+        return if (currentState is OrderState.Initial) {
+            null
+        } else {
+            convertStateToOrder(currentState)
+        }
+    }
 
     override fun getEvents(): List<OrderDomainEvent> = events.toList()
 
     override fun applyEvent(event: OrderDomainEvent) {
         events.add(event)
-        // Reconstitute order from all events
-        reconstitute()
+        // Use Decider to evolve state
+        currentState = OrderDecider.evolve(currentState, event)
+        logger.info("Event applied: ${event::class.simpleName}, new state: ${currentState::class.simpleName}")
     }
 
-    // Command Handlers
-
-    private fun handleCreateOrder(command: OrderCommand.CreateOrder): OrderCommandResult {
-        if (currentOrder != null) {
-            return OrderCommandResult.Failure(
-                com.example.modulith.shared.domain.DomainError.ValidationError(
-                    "Order already exists"
-                )
+    /**
+     * Map Temporal workflow command to domain command
+     */
+    private fun mapToDomainCommand(command: OrderCommand): com.example.modulith.order.domain.command.OrderCommand {
+        return when (command) {
+            is OrderCommand.CreateOrder -> com.example.modulith.order.domain.command.OrderCommand.CreateOrder(
+                orderId = command.orderId,
+                customerId = command.customerId,
+                items = arrow.core.NonEmptyList.fromListUnsafe(command.items)
             )
-        }
-
-        val itemsNel = NonEmptyList.fromListUnsafe(command.items)
-
-        return Order.create(command.customerId, itemsNel)
-            .fold(
-                { error -> OrderCommandResult.Failure(error) },
-                { order ->
-                    // Store events in Temporal's history
-                    order.events.forEach { event ->
-                        events.add(event)
-                        logger.info("Event recorded: ${event::class.simpleName}")
-                    }
-
-                    currentOrder = order
-                    OrderCommandResult.Success(order)
-                }
+            is OrderCommand.ConfirmOrder -> com.example.modulith.order.domain.command.OrderCommand.ConfirmOrder(
+                orderId = command.orderId
             )
-    }
-
-    private fun handleConfirmOrder(command: OrderCommand.ConfirmOrder): OrderCommandResult {
-        val order = currentOrder
-            ?: return OrderCommandResult.Failure(
-                com.example.modulith.shared.domain.DomainError.NotFoundError(
-                    "Order",
-                    command.orderId.value.toString()
-                )
+            is OrderCommand.MarkAsPaid -> com.example.modulith.order.domain.command.OrderCommand.MarkAsPaid(
+                orderId = command.orderId,
+                paymentId = command.paymentId
             )
-
-        return when (order) {
-            is Order.PendingOrder -> order.confirm()
-                .fold(
-                    { error -> OrderCommandResult.Failure(error) },
-                    { confirmedOrder ->
-                        confirmedOrder.events.forEach { events.add(it) }
-                        currentOrder = confirmedOrder
-                        OrderCommandResult.Success(confirmedOrder)
-                    }
-                )
-            else -> OrderCommandResult.Failure(
-                com.example.modulith.shared.domain.DomainError.ValidationError(
-                    "Order cannot be confirmed in current state"
-                )
+            is OrderCommand.StartFulfillment -> com.example.modulith.order.domain.command.OrderCommand.StartFulfillment(
+                orderId = command.orderId
             )
-        }
-    }
-
-    private fun handleMarkAsPaid(command: OrderCommand.MarkAsPaid): OrderCommandResult {
-        val order = currentOrder
-            ?: return OrderCommandResult.Failure(
-                com.example.modulith.shared.domain.DomainError.NotFoundError(
-                    "Order",
-                    command.orderId.value.toString()
-                )
+            is OrderCommand.CompleteOrder -> com.example.modulith.order.domain.command.OrderCommand.CompleteOrder(
+                orderId = command.orderId
             )
-
-        return when (order) {
-            is Order.ConfirmedOrder -> order.markAsPaid(command.paymentId)
-                .fold(
-                    { error -> OrderCommandResult.Failure(error) },
-                    { paidOrder ->
-                        paidOrder.events.forEach { events.add(it) }
-                        currentOrder = paidOrder
-                        OrderCommandResult.Success(paidOrder)
-                    }
-                )
-            else -> OrderCommandResult.Failure(
-                com.example.modulith.shared.domain.DomainError.ValidationError(
-                    "Order cannot be marked as paid in current state"
-                )
-            )
-        }
-    }
-
-    private fun handleStartFulfillment(command: OrderCommand.StartFulfillment): OrderCommandResult {
-        val order = currentOrder
-            ?: return OrderCommandResult.Failure(
-                com.example.modulith.shared.domain.DomainError.NotFoundError(
-                    "Order",
-                    command.orderId.value.toString()
-                )
-            )
-
-        return when (order) {
-            is Order.PaidOrder -> order.startFulfillment()
-                .fold(
-                    { error -> OrderCommandResult.Failure(error) },
-                    { fulfillingOrder ->
-                        fulfillingOrder.events.forEach { events.add(it) }
-                        currentOrder = fulfillingOrder
-                        OrderCommandResult.Success(fulfillingOrder)
-                    }
-                )
-            else -> OrderCommandResult.Failure(
-                com.example.modulith.shared.domain.DomainError.ValidationError(
-                    "Order cannot start fulfillment in current state"
-                )
-            )
-        }
-    }
-
-    private fun handleCompleteOrder(command: OrderCommand.CompleteOrder): OrderCommandResult {
-        val order = currentOrder
-            ?: return OrderCommandResult.Failure(
-                com.example.modulith.shared.domain.DomainError.NotFoundError(
-                    "Order",
-                    command.orderId.value.toString()
-                )
-            )
-
-        return when (order) {
-            is Order.FulfillingOrder -> order.complete()
-                .fold(
-                    { error -> OrderCommandResult.Failure(error) },
-                    { completedOrder ->
-                        completedOrder.events.forEach { events.add(it) }
-                        currentOrder = completedOrder
-                        OrderCommandResult.Success(completedOrder)
-                    }
-                )
-            else -> OrderCommandResult.Failure(
-                com.example.modulith.shared.domain.DomainError.ValidationError(
-                    "Order cannot be completed in current state"
-                )
-            )
-        }
-    }
-
-    private fun handleCancelOrder(command: OrderCommand.CancelOrder): OrderCommandResult {
-        val order = currentOrder
-            ?: return OrderCommandResult.Failure(
-                com.example.modulith.shared.domain.DomainError.NotFoundError(
-                    "Order",
-                    command.orderId.value.toString()
-                )
-            )
-
-        return when (order) {
-            is Order.PendingOrder -> order.cancel()
-                .fold(
-                    { error -> OrderCommandResult.Failure(error) },
-                    { cancelledOrder ->
-                        cancelledOrder.events.forEach { events.add(it) }
-                        currentOrder = cancelledOrder
-                        OrderCommandResult.Success(cancelledOrder)
-                    }
-                )
-            is Order.ConfirmedOrder -> order.cancel()
-                .fold(
-                    { error -> OrderCommandResult.Failure(error) },
-                    { cancelledOrder ->
-                        cancelledOrder.events.forEach { events.add(it) }
-                        currentOrder = cancelledOrder
-                        OrderCommandResult.Success(cancelledOrder)
-                    }
-                )
-            else -> OrderCommandResult.Failure(
-                com.example.modulith.shared.domain.DomainError.ValidationError(
-                    "Order cannot be cancelled in current state"
-                )
+            is OrderCommand.CancelOrder -> com.example.modulith.order.domain.command.OrderCommand.CancelOrder(
+                orderId = command.orderId,
+                reason = command.reason
             )
         }
     }
 
     /**
-     * Reconstitute order from events (event sourcing)
+     * Convert OrderState to Order for backward compatibility
+     * This is temporary until we fully migrate to using OrderState everywhere
      */
-    private fun reconstitute() {
-        if (events.isEmpty()) {
-            currentOrder = null
-            return
-        }
-
-        currentOrder = Order.fromEvents(events)
-            .fold(
-                { error ->
-                    logger.error("Failed to reconstitute order: ${error.message}")
-                    null
-                },
-                { order -> order }
+    private fun convertStateToOrder(state: OrderState): com.example.modulith.order.domain.model.Order? {
+        return when (state) {
+            is OrderState.Initial -> null
+            is OrderState.Pending -> com.example.modulith.order.domain.model.Order.PendingOrder(
+                id = state.orderId,
+                customerId = state.customerId,
+                items = state.items,
+                version = state.version
             )
+            is OrderState.Confirmed -> com.example.modulith.order.domain.model.Order.ConfirmedOrder(
+                id = state.orderId,
+                customerId = state.customerId,
+                items = state.items,
+                totalAmount = state.totalAmount,
+                version = state.version
+            )
+            is OrderState.Paid -> com.example.modulith.order.domain.model.Order.PaidOrder(
+                id = state.orderId,
+                customerId = state.customerId,
+                items = state.items,
+                totalAmount = state.totalAmount,
+                paymentId = state.paymentId,
+                version = state.version
+            )
+            is OrderState.Fulfilling -> com.example.modulith.order.domain.model.Order.FulfillingOrder(
+                id = state.orderId,
+                customerId = state.customerId,
+                items = state.items,
+                totalAmount = state.totalAmount,
+                paymentId = state.paymentId,
+                version = state.version
+            )
+            is OrderState.Completed -> com.example.modulith.order.domain.model.Order.CompletedOrder(
+                id = state.orderId,
+                customerId = state.customerId,
+                items = state.items,
+                totalAmount = state.totalAmount,
+                paymentId = state.paymentId,
+                version = state.version
+            )
+            is OrderState.Cancelled -> com.example.modulith.order.domain.model.Order.CancelledOrder(
+                id = state.orderId,
+                customerId = state.customerId,
+                items = state.items,
+                totalAmount = state.totalAmount,
+                cancellationReason = state.cancellationReason,
+                version = state.version
+            )
+        }
     }
 }
