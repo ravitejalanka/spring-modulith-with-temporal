@@ -55,13 +55,9 @@ fun <A> List<Either<DomainError, A>>.sequence(): Either<DomainError, List<A>> =
 /**
  * Execute a block and catch exceptions as Either
  */
-inline fun <T> catching(block: () -> T): Either<DomainError, T> = either {
-    try {
-        block()
-    } catch (e: Exception) {
-        raise(DomainError.ValidationError(e.message ?: "Unknown error"))
-    }
-}
+inline fun <T> catching(crossinline block: () -> T): Either<DomainError, T> =
+    Either.catch { block() }
+        .mapLeft { e -> DomainError.ValidationError(e.message ?: "Unknown error") }
 
 /**
  * Tap into the success case without changing the value

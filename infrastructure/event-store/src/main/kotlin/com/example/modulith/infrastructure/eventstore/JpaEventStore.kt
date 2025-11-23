@@ -3,6 +3,7 @@ package com.example.modulith.infrastructure.eventstore
 import arrow.core.Either
 import arrow.core.raise.either
 import arrow.core.raise.ensure
+import arrow.core.raise.catch
 import com.example.modulith.shared.domain.DomainError
 import com.example.modulith.shared.domain.DomainEvent
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -110,7 +111,7 @@ class JpaEventStore(
                 )
             }
 
-            try {
+            catch({
                 val entities = events.mapIndexed { index, event ->
                     EventStoreEntity(
                         eventId = event.eventId,
@@ -124,14 +125,15 @@ class JpaEventStore(
                 }
 
                 repository.saveAll(entities)
-            } catch (e: DataIntegrityViolationException) {
-                raise(
-                    DomainError.ConcurrencyError(
-                        "Concurrency conflict saving events for aggregate $aggregateId: ${e.message}"
+            }) { e ->
+                when (e) {
+                    is DataIntegrityViolationException -> raise(
+                        DomainError.ConcurrencyError(
+                            "Concurrency conflict saving events for aggregate $aggregateId: ${e.message}"
+                        )
                     )
-                )
-            } catch (e: Exception) {
-                raise(DomainError.ValidationError("Error saving events: ${e.message}"))
+                    else -> raise(DomainError.ValidationError("Error saving events: ${e.message}"))
+                }
             }
         }
     }
@@ -141,7 +143,7 @@ class JpaEventStore(
         aggregateType: String
     ): Either<DomainError, List<DomainEvent>> = withContext(Dispatchers.IO) {
         either {
-            try {
+            catch({
                 val entities = repository.findByAggregateIdAndAggregateTypeOrderByVersionAsc(
                     aggregateId, aggregateType
                 )
@@ -149,7 +151,7 @@ class JpaEventStore(
                 entities.map { entity ->
                     deserializeEvent(entity).bind()
                 }
-            } catch (e: Exception) {
+            }) { e ->
                 raise(DomainError.ValidationError("Error loading events: ${e.message}"))
             }
         }
@@ -161,7 +163,7 @@ class JpaEventStore(
         fromVersion: Long
     ): Either<DomainError, List<DomainEvent>> = withContext(Dispatchers.IO) {
         either {
-            try {
+            catch({
                 val entities = repository.findByAggregateIdAndAggregateTypeAndVersionGreaterThanEqualOrderByVersionAsc(
                     aggregateId, aggregateType, fromVersion
                 )
@@ -169,7 +171,7 @@ class JpaEventStore(
                 entities.map { entity ->
                     deserializeEvent(entity).bind()
                 }
-            } catch (e: Exception) {
+            }) { e ->
                 raise(DomainError.ValidationError("Error loading events: ${e.message}"))
             }
         }
@@ -180,11 +182,11 @@ class JpaEventStore(
         aggregateType: String
     ): Either<DomainError, Long> = withContext(Dispatchers.IO) {
         either {
-            try {
+            catch({
                 repository.findFirstByAggregateIdAndAggregateTypeOrderByVersionDesc(
                     aggregateId, aggregateType
                 )?.version ?: 0L
-            } catch (e: Exception) {
+            }) { e ->
                 raise(DomainError.ValidationError("Error getting version: ${e.message}"))
             }
         }
@@ -194,9 +196,9 @@ class JpaEventStore(
         val eventClass = eventRegistry.getEventClass(entity.eventType)
             ?: raise(DomainError.ValidationError("Unknown event type: ${entity.eventType}"))
 
-        try {
+        catch({
             objectMapper.readValue(entity.eventData, eventClass)
-        } catch (e: Exception) {
+        }) { e ->
             raise(DomainError.ValidationError("Error deserializing event: ${e.message}"))
         }
     }

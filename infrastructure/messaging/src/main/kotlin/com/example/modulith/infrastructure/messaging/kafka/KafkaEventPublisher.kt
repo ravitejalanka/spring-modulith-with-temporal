@@ -2,6 +2,7 @@ package com.example.modulith.infrastructure.messaging.kafka
 
 import arrow.core.Either
 import arrow.core.raise.either
+import arrow.core.raise.catch
 import com.example.modulith.infrastructure.messaging.EventPublisher
 import com.example.modulith.shared.domain.DomainError
 import com.example.modulith.shared.event.EventEnvelope
@@ -31,13 +32,13 @@ class KafkaEventPublisher(
 
     override suspend fun publish(event: IntegrationEvent): Either<DomainError, Unit> = either {
         withContext(Dispatchers.IO) {
-            try {
+            catch({
                 val topic = topicResolver.resolve(event.eventType)
                 val payload = objectMapper.writeValueAsString(event)
 
                 kafkaTemplate.send(topic, event.eventId.toString(), payload)
                     .await()
-            } catch (e: Exception) {
+            }) { e ->
                 raise(DomainError.ValidationError("Failed to publish event to Kafka: ${e.message}"))
             }
         }
@@ -53,13 +54,13 @@ class KafkaEventPublisher(
         envelope: EventEnvelope<out IntegrationEvent>
     ): Either<DomainError, Unit> = either {
         withContext(Dispatchers.IO) {
-            try {
+            catch({
                 val topic = topicResolver.resolve(envelope.eventType)
                 val payload = objectMapper.writeValueAsString(envelope)
 
                 kafkaTemplate.send(topic, envelope.eventId.toString(), payload)
                     .await()
-            } catch (e: Exception) {
+            }) { e ->
                 raise(DomainError.ValidationError("Failed to publish event envelope to Kafka: ${e.message}"))
             }
         }
