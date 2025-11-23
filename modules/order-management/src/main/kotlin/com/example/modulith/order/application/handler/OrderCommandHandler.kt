@@ -14,6 +14,7 @@ import io.temporal.client.WorkflowClient
 import io.temporal.client.WorkflowOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.springframework.context.ApplicationEventPublisher
 import org.springframework.stereotype.Service
 import java.time.Duration
 import java.time.Instant
@@ -26,14 +27,16 @@ import java.util.UUID
  * 1. Load current state from event store (Temporal)
  * 2. Use OrderDecider.decide() to get events
  * 3. Store events in event store (Temporal)
- * 4. Publish integration events if needed
+ * 4. Publish domain events (for projections)
+ * 5. Publish integration events (for other modules)
  *
  * This follows the f{model} pattern for clean separation
  */
 @Service
 class OrderCommandHandler(
     private val workflowClient: WorkflowClient,
-    private val integrationEventPublisher: IntegrationEventPublisher
+    private val integrationEventPublisher: IntegrationEventPublisher,
+    private val applicationEventPublisher: ApplicationEventPublisher
 ) {
 
     companion object {
@@ -58,12 +61,15 @@ class OrderCommandHandler(
         // 3. Store events in event store (Temporal workflow)
         storeEvents(command.orderId, events.toList()).bind()
 
-        // 4. Evolve state with new events
+        // 4. Publish domain events (for projections to listen)
+        publishDomainEvents(events.toList())
+
+        // 5. Evolve state with new events
         val newState = events.fold(currentState) { state, event ->
             OrderDecider.evolve(state, event)
         }
 
-        // 5. Publish integration events if needed
+        // 6. Publish integration events (for other modules)
         publishIntegrationEvents(events.toList()).bind()
 
         newState
@@ -136,6 +142,20 @@ class OrderCommandHandler(
             OrderAggregateWorkflow::class.java,
             options
         )
+    }
+
+    /**
+     * Publish domain events for projections to listen
+     *
+     * This enables the PROJECTION pattern:
+     * - Events are published to internal event bus
+     * - Projections listen and update read models
+     * - Fully decoupled from command side
+     */
+    private fun publishDomainEvents(events: List<OrderDomainEvent>) {
+        events.forEach { event ->
+            applicationEventPublisher.publishEvent(event)
+        }
     }
 
     /**
